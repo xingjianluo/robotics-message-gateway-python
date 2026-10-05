@@ -153,11 +153,20 @@ def create_app(
         broker: Broker = app.state.broker
         sessions: SessionManager = app.state.sessions
         session = sessions.get(event.client_id)
-        if event.kind == "account_removed" and session is not None:
-            # 身份已注销：在线连接立即断开（其余客户端不受影响）
-            if session.active is not None:
-                session.active.request_close("account_removed")
         if session is None:
+            return
+        conn: Connection | None = session.active
+        if event.kind == "account_removed":
+            # 身份已注销：在线连接立即断开，全部订阅静默收回
+            # （连接随即关闭，无需逐条通知；其余客户端不受影响）
+            if conn is not None:
+                conn.request_close("account_removed")
+            for filt, sub in list(session.subscriptions.items()):
+                broker.unsubscribe(sub)
+                session.revoked_subscriptions += 1
+                if conn is not None:
+                    conn.stop_pump(filt)
+            session.subscriptions.clear()
             return
         # 追溯收回：重新校验该身份的既有订阅，不再被允许的立即失效
         for filt in list(session.subscriptions):
@@ -166,7 +175,6 @@ def create_app(
             sub = session.subscriptions.pop(filt)
             broker.unsubscribe(sub)
             session.revoked_subscriptions += 1
-            conn: Connection | None = session.active
             if conn is not None:
                 conn.stop_pump(filt)
                 conn.purge_filter(filt)
