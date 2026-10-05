@@ -21,7 +21,15 @@ TOKENS = {
     "t-pub": "publisher",
     "t-sub": "subscriber",
     "t-arm": "arm-only",
+    # 需要多个并存身份的场景（慢消费者隔离、并发发布）使用独立身份
+    "t-sub2": "subscriber-2",
+    "t-pub1": "publisher-1",
+    "t-pub2": "publisher-2",
+    "t-pub3": "publisher-3",
 }
+
+# 管理接口凭据（与客户端凭据分离）
+ADMIN_TOKEN = "t-root"
 
 RULES = [
     ACLRule("admin", Action.PUBLISH, "#"),
@@ -30,6 +38,10 @@ RULES = [
     ACLRule("subscriber", Action.SUBSCRIBE, "robot/#"),
     ACLRule("arm-only", Action.SUBSCRIBE, "robot/arm/#"),
     ACLRule("arm-only", Action.PUBLISH, "robot/arm/#"),
+    ACLRule("subscriber-2", Action.SUBSCRIBE, "robot/#"),
+    ACLRule("publisher-1", Action.PUBLISH, "robot/#"),
+    ACLRule("publisher-2", Action.PUBLISH, "robot/#"),
+    ACLRule("publisher-3", Action.PUBLISH, "robot/#"),
 ]
 
 
@@ -46,6 +58,7 @@ def app():
     application = create_app()
     application.state.acl.set_tokens(dict(TOKENS))
     application.state.acl.set_rules(list(RULES))
+    application.state.acl.set_admin_tokens({ADMIN_TOKEN})
     return application
 
 

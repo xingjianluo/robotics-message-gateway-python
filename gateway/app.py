@@ -3,23 +3,32 @@
 HTTP：
 - POST /publish   发布消息（Authorization: Bearer <token>）
 - GET  /retained  按过滤器查询保留消息（仅返回有订阅权限的主题）
-- GET  /stats     可观测指标（积压、丢弃、会话状态）
+- GET  /stats     可观测指标（积压、丢弃、会话状态、接管/收回计数）
+- /admin/*        运行期账号与权限治理（管理凭据保护，见 admin.py）
 
 WebSocket /ws?token=&client_id=&clean=
 - 客户端 -> 服务端：subscribe/unsubscribe/publish/ack
-- 服务端 -> 客户端：subscribed/unsubscribed/published/message/error
+- 服务端 -> 客户端：subscribed/unsubscribed/published/message/error/displaced
+- client_id 必须与凭据身份一致，否则以 4403 拒绝（identity_mismatch）。
+- 同一身份新连接会顶掉旧连接（takeover）：旧连接收到 displaced 帧后以
+  4000 关闭，其未确认消息按原顺序由会话交接给新连接，不重、不乱序，
+  接管次数计入会话指标。
 - 断线重连（同 client_id 且 clean=false）：先按原顺序重投未确认消息，
   再继续投递离线期间积压的消息。
+- 权限被运行期收紧后，不再被允许的订阅立即失效（permission_revoked），
+  在途的该过滤器消息被清除，未确认消息不受影响。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 
 from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from . import topics
+from .admin import AdminEvent, create_admin_router
 from .auth import ACLStore, Action, DenyReason
 from .broker import Broker
 from .messages import Message
@@ -29,9 +38,75 @@ logger = logging.getLogger("gateway")
 
 DEFAULT_MAX_INFLIGHT = 64  # 单连接已投递未确认上限，超出则施加背压
 
+# WebSocket 关闭码
+CLOSE_INVALID_CREDENTIALS = 4401
+CLOSE_IDENTITY_MISMATCH = 4403
+CLOSE_TAKEOVER = 4000
+
 
 def _error(op: str, reason: str) -> dict:
     return {"type": "error", "op": op, "reason": reason}
+
+
+class Connection:
+    """一条在线连接的运行态：转发队列、泵、在途消息、关闭/交接协调。"""
+
+    def __init__(self, ws: WebSocket, session: Session, max_queue: int) -> None:
+        self.ws = ws
+        self.session = session
+        self.incoming: asyncio.Queue[Message] = asyncio.Queue(maxsize=max_queue)
+        self.pumps: dict[str, asyncio.Task] = {}
+        self.inflight: list[Message] = []  # 泵已取出但未入 incoming 的消息
+        self.ack_event = asyncio.Event()
+        self.close_event = asyncio.Event()  # 外部请求关闭（接管/账号注销）
+        self.close_reason = ""
+        self.handover_done = asyncio.Event()  # 收尾完成（在途消息已回会话）
+
+    def request_close(self, reason: str) -> None:
+        self.close_reason = reason
+        self.close_event.set()
+
+    def start_pump(self, filt: str) -> None:
+        self.pumps[filt] = asyncio.create_task(self._pump(filt))
+
+    def stop_pump(self, filt: str) -> None:
+        task = self.pumps.pop(filt, None)
+        if task:
+            task.cancel()
+
+    async def _pump(self, filt: str) -> None:
+        sub = self.session.subscriptions[filt]
+        try:
+            while True:
+                msg = await sub.queue.get()
+                self.inflight.append(msg)
+                try:
+                    await self.incoming.put(msg)
+                except asyncio.CancelledError:
+                    raise  # 保留在 inflight 中，由连接收尾按序回收
+                else:
+                    self.inflight.remove(msg)
+        except (asyncio.CancelledError, KeyError):
+            pass
+
+    def purge_filter(self, filt: str) -> None:
+        """权限收回后，清除在途但尚未投递的该过滤器消息（不含未确认消息）。"""
+        kept: list[Message] = []
+        while True:
+            try:
+                msg = self.incoming.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if not topics.match(filt, msg.topic):
+                kept.append(msg)
+        for msg in kept:  # 只减不增，put_nowait 不会满
+            self.incoming.put_nowait(msg)
+        self.inflight[:] = [
+            m for m in self.inflight if not topics.match(filt, m.topic)
+        ]
+        self.session.ready = deque(
+            m for m in self.session.ready if not topics.match(filt, m.topic)
+        )
 
 
 def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -> FastAPI:
@@ -45,6 +120,43 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
         if not authorization or not authorization.startswith("Bearer "):
             return None
         return app.state.acl.authenticate(authorization.removeprefix("Bearer ").strip())
+
+    # ---------------- 运行期治理的追溯生效 ----------------
+
+    async def _on_admin_event(event: AdminEvent) -> None:
+        acl: ACLStore = app.state.acl
+        broker: Broker = app.state.broker
+        sessions: SessionManager = app.state.sessions
+        session = sessions.get(event.client_id)
+        if event.kind == "account_removed" and session is not None:
+            # 身份已注销：在线连接立即断开（其余客户端不受影响）
+            if session.active is not None:
+                session.active.request_close("account_removed")
+        if session is None:
+            return
+        # 追溯收回：重新校验该身份的既有订阅，不再被允许的立即失效
+        for filt in list(session.subscriptions):
+            if acl.authorize_subscribe(session.client_id, filt).allowed:
+                continue
+            sub = session.subscriptions.pop(filt)
+            broker.unsubscribe(sub)
+            session.revoked_subscriptions += 1
+            conn: Connection | None = session.active
+            if conn is not None:
+                conn.stop_pump(filt)
+                conn.purge_filter(filt)
+                try:
+                    await conn.ws.send_json(
+                        {
+                            "type": "unsubscribed",
+                            "filter": filt,
+                            "reason": "permission_revoked",
+                        }
+                    )
+                except Exception:
+                    pass  # 连接可能正在关闭，收回本身已完成
+
+    app.include_router(create_admin_router(app.state.acl, _on_admin_event))
 
     # ---------------- HTTP ----------------
 
@@ -129,43 +241,41 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
         authed_id = acl.authenticate(token)
         if authed_id is None:
             await ws.send_json(_error("connect", DenyReason.INVALID_CREDENTIALS.value))
-            await ws.close(code=4401)
+            await ws.close(code=CLOSE_INVALID_CREDENTIALS)
             return
 
+        # 连接声明的身份必须与凭据归属一致，防止冒用他人会话
         client_id = ws.query_params.get("client_id") or authed_id
+        if client_id != authed_id:
+            await ws.send_json(_error("connect", "identity_mismatch"))
+            await ws.close(code=CLOSE_IDENTITY_MISMATCH)
+            return
+
         clean = ws.query_params.get("clean", "false").lower() == "true"
         if clean:
             old = sessions.get(client_id)
             if old is not None:
+                if old.active is not None:
+                    old.active.request_close("takeover")
                 for sub in old.subscriptions.values():
                     broker.unsubscribe(sub)
         session = sessions.get_or_create(client_id, clean=clean)
-        session.connected = True
+        conn = Connection(ws, session, broker.max_queue)
+        async with session.connect_lock:
+            old_conn: Connection | None = session.active
+            if old_conn is not None:
+                # 接管语义：后连上的顶掉先前的；等旧连接收尾完成，
+                # 其在途消息按序回到会话后再开始投递，保证不重、不乱序
+                session.takeovers += 1
+                old_conn.request_close("takeover")
+                await old_conn.handover_done.wait()
+            session.active = conn
+            session.connected = True
         await ws.send_json({"type": "connected", "client_id": client_id})
-
-        incoming: asyncio.Queue[Message] = asyncio.Queue(maxsize=broker.max_queue)
-        pumps: dict[str, asyncio.Task] = {}
-        inflight: list[Message] = []  # 泵已取出但未入 incoming 的消息（取消时回收）
-        ack_event = asyncio.Event()
-
-        async def pump(filt: str) -> None:
-            sub = session.subscriptions[filt]
-            try:
-                while True:
-                    msg = await sub.queue.get()
-                    inflight.append(msg)
-                    try:
-                        await incoming.put(msg)
-                    except asyncio.CancelledError:
-                        raise  # 保留在 inflight 中，由连接收尾按序回收
-                    else:
-                        inflight.remove(msg)
-            except (asyncio.CancelledError, KeyError):
-                pass
 
         # 重连时恢复既有订阅的转发泵（离线积压由此继续投递）
         for filt in session.subscriptions:
-            pumps[filt] = asyncio.create_task(pump(filt))
+            conn.start_pump(filt)
 
         async def sender() -> None:
             # 1) 重投未确认消息（保持原顺序）
@@ -184,9 +294,9 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
             # 3) 持续投递新消息；未确认数达上限时施加背压
             while True:
                 while len(session.pending) >= app.state.max_inflight:
-                    ack_event.clear()
-                    await ack_event.wait()
-                msg = await incoming.get()
+                    conn.ack_event.clear()
+                    await conn.ack_event.wait()
+                msg = await conn.incoming.get()
                 session.pending.append(msg)
                 await ws.send_json(
                     {"type": "message", "message": msg.to_dict(), "redelivered": False}
@@ -203,7 +313,7 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
                 return {"type": "subscribed", "filter": filt, "duplicate": True}
             sub = broker.subscribe(filt)  # 保留消息在此先行入队
             session.subscriptions[filt] = sub
-            pumps[filt] = asyncio.create_task(pump(filt))
+            conn.start_pump(filt)
             return {"type": "subscribed", "filter": filt, "duplicate": False}
 
         def handle_unsubscribe(filt: str) -> dict:
@@ -211,9 +321,7 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
             if sub is None:
                 return _error("unsubscribe", "not_subscribed")
             broker.unsubscribe(sub)
-            task = pumps.pop(filt, None)
-            if task:
-                task.cancel()
+            conn.stop_pump(filt)
             return {"type": "unsubscribed", "filter": filt}
 
         async def handle_publish(data: dict) -> dict:
@@ -237,13 +345,33 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
             for msg in list(session.pending):
                 if msg.seq == seq:
                     session.pending.remove(msg)
-                    ack_event.set()
+                    conn.ack_event.set()
                     return
 
         sender_task = asyncio.create_task(sender())
+        close_task = asyncio.create_task(conn.close_event.wait())
         try:
             while True:
-                data = await ws.receive_json()
+                recv_task = asyncio.create_task(ws.receive_json())
+                done, _ = await asyncio.wait(
+                    {recv_task, close_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if close_task in done:  # 被接管或账号被注销
+                    recv_task.cancel()
+                    try:
+                        await ws.send_json(
+                            {"type": "displaced", "reason": conn.close_reason}
+                        )
+                        await ws.close(
+                            code=CLOSE_TAKEOVER
+                            if conn.close_reason == "takeover"
+                            else CLOSE_INVALID_CREDENTIALS
+                        )
+                    except Exception:
+                        pass
+                    break
+                recv_task_done = recv_task
+                data = recv_task_done.result()
                 op = data.get("op")
                 if op == "subscribe":
                     await ws.send_json(handle_subscribe(str(data.get("filter", ""))))
@@ -258,13 +386,14 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
         except WebSocketDisconnect:
             logger.info("client %s disconnected", client_id)
         finally:
+            close_task.cancel()
             sender_task.cancel()
-            for task in pumps.values():
+            for task in conn.pumps.values():
                 task.cancel()
-            if pumps:
+            if conn.pumps:
                 # 客户端 abrupt 断开时外层可能取消本协程；屏蔽取消，
                 # 确保泵退出与在途消息回收一定完成（不丢、不乱序）
-                wait = asyncio.gather(*pumps.values(), return_exceptions=True)
+                wait = asyncio.gather(*conn.pumps.values(), return_exceptions=True)
                 while not wait.done():
                     try:
                         await asyncio.shield(wait)
@@ -274,12 +403,14 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
             # 先是 incoming 中较早的消息，再是泵取消瞬间在途的消息
             while True:
                 try:
-                    session.ready.append(incoming.get_nowait())
+                    session.ready.append(conn.incoming.get_nowait())
                 except asyncio.QueueEmpty:
                     break
-            session.ready.extend(inflight)
-            inflight.clear()
-            session.connected = False
+            session.ready.extend(conn.inflight)
+            conn.inflight.clear()
+            if session.active is conn:
+                session.note_disconnected()
+            conn.handover_done.set()
             # 订阅保留在会话中：离线期间消息在 broker 有界队列中积压，
             # 重连后依次重投 pending、ready，再消费积压，保证不丢、不重、不乱序。
 

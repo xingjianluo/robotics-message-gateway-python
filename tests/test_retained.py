@@ -17,7 +17,7 @@ def test_new_subscriber_receives_last_retained(client):
     _publish(client, "t-pub", "robot/arm", "v2")  # 覆盖同主题保留
     _publish(client, "t-pub", "robot/leg", "l1")
 
-    with client.websocket_connect("/ws?token=t-sub&client_id=sub-retained-1") as ws:
+    with client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as ws:
         assert ws.receive_json()["type"] == "connected"
         ws.send_json({"op": "subscribe", "filter": "robot/#"})
         assert ws.receive_json()["type"] == "subscribed"
@@ -63,7 +63,7 @@ def test_retained_visible_via_http_consistently(client):
 
 def test_duplicate_subscribe_idempotent(client):
     _publish(client, "t-pub", "robot/arm", "dup-check")
-    with client.websocket_connect("/ws?token=t-sub&client_id=sub-dup") as ws:
+    with client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as ws:
         ws.receive_json()
         ws.send_json({"op": "subscribe", "filter": "robot/#"})
         first = ws.receive_json()

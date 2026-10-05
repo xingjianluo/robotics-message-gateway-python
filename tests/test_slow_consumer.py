@@ -22,8 +22,8 @@ def _make_client() -> TestClient:
 
 def test_slow_consumer_does_not_block_others():
     with _make_client() as client:
-        with client.websocket_connect("/ws?token=t-sub&client_id=slow-1") as slow, \
-             client.websocket_connect("/ws?token=t-sub&client_id=fast-1") as fast:
+        with client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as slow, \
+             client.websocket_connect("/ws?token=t-sub2&client_id=subscriber-2") as fast:
             slow.receive_json()
             fast.receive_json()
             for ws in (slow, fast):
@@ -48,7 +48,7 @@ def test_slow_consumer_does_not_block_others():
         stats = None
         for _ in range(50):
             stats = client.get("/stats", headers=auth("t-sub")).json()
-            slow_now = {s["client_id"]: s for s in stats["sessions"]}["slow-1"]
+            slow_now = {s["client_id"]: s for s in stats["sessions"]}["subscriber"]
             if (
                 slow_now["pending_unacked"] + slow_now["ready"]
                 + slow_now["backlog"] + slow_now["dropped"] == TOTAL
@@ -56,7 +56,7 @@ def test_slow_consumer_does_not_block_others():
                 break
             time.sleep(0.02)
         sessions = {s["client_id"]: s for s in stats["sessions"]}
-        slow_stats, fast_stats = sessions["slow-1"], sessions["fast-1"]
+        slow_stats, fast_stats = sessions["subscriber"], sessions["subscriber-2"]
         log_case(
             "慢消费者隔离",
             {"total": TOTAL, "max_queue": MAX_QUEUE, "max_inflight": MAX_INFLIGHT,
@@ -87,7 +87,7 @@ def test_slow_consumer_does_not_block_others():
 
 def test_slow_consumer_recovers_after_draining():
     with _make_client() as client:
-        with client.websocket_connect("/ws?token=t-sub&client_id=slow-2") as slow:
+        with client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as slow:
             slow.receive_json()
             slow.send_json({"op": "subscribe", "filter": "robot/#"})
             slow.receive_json()

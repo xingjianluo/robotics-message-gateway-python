@@ -7,12 +7,17 @@
 - 已投递未确认的消息保存在 ``pending`` 中；重连后先按原顺序重投
   pending，再继续消费订阅队列，保证不丢、不重、不乱序。
 - ``clean=True`` 的连接会清除旧会话（语义同 MQTT clean session）。
+- ``active`` 指向当前在线连接（同一身份同一时刻至多一条，
+  新连接接管时旧连接被顶掉，见 app.py 的接管语义）。
 """
 from __future__ import annotations
 
+import asyncio
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Any
 
 from .broker import Subscription
 from .messages import Message
@@ -26,6 +31,17 @@ class Session:
     ready: deque[Message] = field(default_factory=deque)  # 断线时已出队未投递，重连后先于新消息投递
     connected: bool = False
     redelivered_count: int = 0
+    active: Any = None  # 当前在线连接（app.Connection），离线为 None
+    connect_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    takeovers: int = 0  # 本身份被新连接接管的次数
+    revoked_subscriptions: int = 0  # 权限收紧后被追溯收回的订阅数
+    backlog_dropped: int = 0  # 离线积压超限被丢弃的消息数
+    last_disconnect: float = 0.0  # 最近一次断开的时间戳（过期回收依据）
+
+    def note_disconnected(self) -> None:
+        self.connected = False
+        self.active = None
+        self.last_disconnect = time.monotonic()
 
     def stats(self) -> dict:
         return {
@@ -34,6 +50,9 @@ class Session:
             "pending_unacked": len(self.pending),
             "ready": len(self.ready),
             "redelivered": self.redelivered_count,
+            "takeovers": self.takeovers,
+            "revoked_subscriptions": self.revoked_subscriptions,
+            "backlog_dropped": self.backlog_dropped,
             "subscriptions": [s.stats() for s in self.subscriptions.values()],
             "backlog": sum(s.queue.qsize() for s in self.subscriptions.values()),
             "dropped": sum(s.dropped for s in self.subscriptions.values()),
@@ -59,9 +78,13 @@ class SessionManager:
                 self._sessions[client_id] = session
             return session
 
-    def remove(self, client_id: str) -> None:
+    def remove(self, client_id: str) -> Session | None:
         with self._lock:
-            self._sessions.pop(client_id, None)
+            return self._sessions.pop(client_id, None)
+
+    def all_sessions(self) -> list[Session]:
+        with self._lock:
+            return list(self._sessions.values())
 
     def stats(self, client_id: str) -> dict | None:
         with self._lock:
