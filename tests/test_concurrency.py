@@ -7,17 +7,19 @@ from tests.conftest import auth, log_case
 
 PUBLISHERS = 3
 PER_PUBLISHER = 10
+PUB_TOKENS = ["t-pub", "t-pub2", "t-pub3"]
+PUB_IDS = ["publisher", "publisher2", "publisher3"]
 
 
 def test_concurrent_publishers_no_loss_no_dup(client):
-    with client.websocket_connect("/ws?token=t-sub&client_id=sub-conc") as sub:
+    with client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as sub:
         sub.receive_json()
         sub.send_json({"op": "subscribe", "filter": "robot/#"})
         sub.receive_json()
         stack = ExitStack()
         pubs = [
             stack.enter_context(
-                client.websocket_connect(f"/ws?token=t-pub&client_id=pub-c{i}")
+                client.websocket_connect(f"/ws?token={PUB_TOKENS[i]}&client_id={PUB_IDS[i]}")
             )
             for i in range(PUBLISHERS)
         ]
@@ -53,7 +55,7 @@ def test_concurrent_publishers_no_loss_no_dup(client):
 
 def test_http_and_ws_publish_consistent(client):
     """HTTP 与 WS 发布的消息经同一 broker 投递，订阅者无差别接收。"""
-    with client.websocket_connect("/ws?token=t-sub&client_id=sub-mixed") as sub:
+    with client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as sub:
         sub.receive_json()
         sub.send_json({"op": "subscribe", "filter": "robot/#"})
         sub.receive_json()
@@ -62,7 +64,7 @@ def test_http_and_ws_publish_consistent(client):
             json={"topic": "robot/arm", "payload": "via-http"},
             headers=auth("t-pub"),
         )
-        with client.websocket_connect("/ws?token=t-pub&client_id=pub-mixed") as pub:
+        with client.websocket_connect("/ws?token=t-pub&client_id=publisher") as pub:
             pub.receive_json()
             pub.send_json({"op": "publish", "topic": "robot/arm", "payload": "via-ws"})
             assert pub.receive_json()["type"] == "published"

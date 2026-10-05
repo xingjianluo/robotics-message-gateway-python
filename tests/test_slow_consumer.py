@@ -20,8 +20,8 @@ def _make_client() -> TestClient:
 
 def test_slow_consumer_does_not_block_others():
     with _make_client() as client:
-        with client.websocket_connect("/ws?token=t-sub&client_id=slow-1") as slow, \
-             client.websocket_connect("/ws?token=t-sub&client_id=fast-1") as fast:
+        with client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as slow, \
+             client.websocket_connect("/ws?token=t-sub2&client_id=subscriber2") as fast:
             slow.receive_json()
             fast.receive_json()
             for ws in (slow, fast):
@@ -44,7 +44,7 @@ def test_slow_consumer_does_not_block_others():
         # 断开 slow：传输中的消息回收进会话，统计达到守恒稳态
         stats = client.get("/stats", headers=auth("t-sub")).json()
         sessions = {s["client_id"]: s for s in stats["sessions"]}
-        slow_stats, fast_stats = sessions["slow-1"], sessions["fast-1"]
+        slow_stats, fast_stats = sessions["subscriber"], sessions["subscriber2"]
         log_case(
             "慢消费者隔离",
             {"total": TOTAL, "max_queue": MAX_QUEUE, "max_inflight": MAX_INFLIGHT,
@@ -75,7 +75,7 @@ def test_slow_consumer_does_not_block_others():
 
 def test_slow_consumer_recovers_after_draining():
     with _make_client() as client:
-        with client.websocket_connect("/ws?token=t-sub&client_id=slow-2") as slow:
+        with client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as slow:
             slow.receive_json()
             slow.send_json({"op": "subscribe", "filter": "robot/#"})
             slow.receive_json()

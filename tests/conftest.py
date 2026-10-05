@@ -19,7 +19,10 @@ log = logging.getLogger("gateway.test")
 TOKENS = {
     "t-admin": "admin",
     "t-pub": "publisher",
+    "t-pub2": "publisher2",
+    "t-pub3": "publisher3",
     "t-sub": "subscriber",
+    "t-sub2": "subscriber2",
     "t-arm": "arm-only",
 }
 
@@ -27,7 +30,10 @@ RULES = [
     ACLRule("admin", Action.PUBLISH, "#"),
     ACLRule("admin", Action.SUBSCRIBE, "#"),
     ACLRule("publisher", Action.PUBLISH, "robot/#"),
+    ACLRule("publisher2", Action.PUBLISH, "robot/#"),
+    ACLRule("publisher3", Action.PUBLISH, "robot/#"),
     ACLRule("subscriber", Action.SUBSCRIBE, "robot/#"),
+    ACLRule("subscriber2", Action.SUBSCRIBE, "robot/#"),
     ACLRule("arm-only", Action.SUBSCRIBE, "robot/arm/#"),
     ACLRule("arm-only", Action.PUBLISH, "robot/arm/#"),
 ]

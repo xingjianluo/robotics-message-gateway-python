@@ -14,7 +14,7 @@ def _pub(client, topic, payload):
 
 
 def test_unacked_redelivered_in_order_then_backlog(client):
-    cid = "sub-reconnect"
+    cid = "subscriber"
     with client.websocket_connect(f"/ws?token=t-sub&client_id={cid}") as ws:
         ws.receive_json()
         ws.send_json({"op": "subscribe", "filter": "robot/#"})
@@ -50,7 +50,7 @@ def test_unacked_redelivered_in_order_then_backlog(client):
 
 
 def test_clean_session_discards_state(client):
-    cid = "sub-clean"
+    cid = "subscriber"
     with client.websocket_connect(f"/ws?token=t-sub&client_id={cid}") as ws:
         ws.receive_json()
         ws.send_json({"op": "subscribe", "filter": "robot/#"})
@@ -74,7 +74,7 @@ def test_clean_session_discards_state(client):
 
 
 def test_reconnect_without_resubscribe_keeps_subscription(client):
-    cid = "sub-persistent"
+    cid = "subscriber"
     with client.websocket_connect(f"/ws?token=t-sub&client_id={cid}") as ws:
         ws.receive_json()
         ws.send_json({"op": "subscribe", "filter": "robot/#"})

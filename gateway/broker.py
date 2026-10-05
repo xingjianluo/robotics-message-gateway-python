@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from . import topics
@@ -28,6 +29,10 @@ class Subscription:
     queue: asyncio.Queue[Message] = field(repr=False)
     delivered: int = 0
     dropped: int = 0
+    # 入队成功后的回调（由会话层挂载，用于离线积压总量上限等治理逻辑）
+    overflow_hook: Callable[[Subscription], None] | None = field(
+        default=None, repr=False
+    )
 
     def stats(self) -> dict:
         return {
@@ -60,6 +65,9 @@ class Broker:
                 delivered += 1
             except asyncio.QueueFull:
                 sub.dropped += 1
+            else:
+                if sub.overflow_hook is not None:
+                    sub.overflow_hook(sub)
         return PublishResult(accepted=True, delivered=delivered)
 
     def subscribe(self, topic_filter: str) -> Subscription:

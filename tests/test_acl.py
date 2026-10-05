@@ -53,7 +53,7 @@ def test_unauthorized_publish_http(client):
 
 
 def test_unauthorized_publish_ws_does_not_break_connection(client):
-    with client.websocket_connect("/ws?token=t-arm&client_id=arm-1") as ws:
+    with client.websocket_connect("/ws?token=t-arm&client_id=arm-only") as ws:
         ws.receive_json()
         ws.send_json({"op": "publish", "topic": "robot/leg", "payload": "x"})
         denied = ws.receive_json()
@@ -71,7 +71,7 @@ def test_unauthorized_publish_ws_does_not_break_connection(client):
 
 
 def test_unauthorized_subscribe_ws(client):
-    with client.websocket_connect("/ws?token=t-arm&client_id=arm-2") as ws:
+    with client.websocket_connect("/ws?token=t-arm&client_id=arm-only") as ws:
         ws.receive_json()
         ws.send_json({"op": "subscribe", "filter": "robot/#"})
         resp = ws.receive_json()
@@ -102,7 +102,7 @@ def test_invalid_topic_reasons_distinguishable(client):
 
 
 def test_rule_update_applies_to_existing_connection(client, app):
-    with client.websocket_connect("/ws?token=t-arm&client_id=arm-3") as ws:
+    with client.websocket_connect("/ws?token=t-arm&client_id=arm-only") as ws:
         ws.receive_json()
         ws.send_json({"op": "subscribe", "filter": "robot/leg/#"})
         denied = ws.receive_json()
@@ -123,7 +123,7 @@ def test_rule_update_applies_to_existing_connection(client, app):
 
 
 def test_unauthorized_publish_does_not_affect_others(client):
-    with client.websocket_connect("/ws?token=t-sub&client_id=sub-observer") as ws:
+    with client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as ws:
         ws.receive_json()
         ws.send_json({"op": "subscribe", "filter": "robot/#"})
         assert ws.receive_json()["type"] == "subscribed"
