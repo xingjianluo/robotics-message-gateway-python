@@ -61,6 +61,7 @@ def test_takeover_hands_over_unacked_in_order(client):
         )
     a1 = ws_a.receive_json()
     a2 = ws_a.receive_json()  # m1/m2 均未确认
+    assert [a1["message"]["payload"], a2["message"]["payload"]] == ["m1", "m2"]
 
     # 连接 B（同身份）：顶掉 A
     with client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as ws_b:
@@ -78,7 +79,7 @@ def test_takeover_hands_over_unacked_in_order(client):
         )
         b3 = ws_b.receive_json()
         stats = client.get("/stats", headers=auth("t-sub")).json()
-        session = [s for s in stats["sessions"] if s["client_id"] == "subscriber"][0]
+        session = next(s for s in stats["sessions"] if s["client_id"] == "subscriber")
         log_case(
             "同身份接管",
             {"unacked_on_a": ["m1", "m2"], "new_published": ["m3"]},
@@ -114,7 +115,7 @@ def test_takeover_visible_in_stats_and_old_conn_cannot_publish(client):
         assert ws_a.receive_json()["type"] == "displaced"
         # 被顶掉的连接上再发消息：连接已关闭，发送失败
         stats = client.get("/stats", headers=auth("t-sub")).json()
-        session = [s for s in stats["sessions"] if s["client_id"] == "subscriber"][0]
+        session = next(s for s in stats["sessions"] if s["client_id"] == "subscriber")
         log_case(
             "接管可观测",
             {"client_id": "subscriber"},

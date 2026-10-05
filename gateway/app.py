@@ -82,12 +82,10 @@ class Connection:
             while True:
                 msg = await sub.queue.get()
                 self.inflight.append(msg)
-                try:
-                    await self.incoming.put(msg)
-                except asyncio.CancelledError:
-                    raise  # 保留在 inflight 中，由连接收尾按序回收
-                else:
-                    self.inflight.remove(msg)
+                # 若泵在 put 期间被取消，消息保留在 inflight 中，
+                # 由连接收尾按序回收进会话
+                await self.incoming.put(msg)
+                self.inflight.remove(msg)
         except (asyncio.CancelledError, KeyError):
             pass
 
@@ -186,8 +184,8 @@ def create_app(
                             "reason": "permission_revoked",
                         }
                     )
-                except Exception:
-                    pass  # 连接可能正在关闭，收回本身已完成
+                except Exception:  # noqa: BLE001, S110 连接可能正在关闭，收回本身已完成
+                    pass
 
     app.include_router(create_admin_router(app.state.acl, _on_admin_event))
 
@@ -403,7 +401,7 @@ def create_app(
                             if conn.close_reason == "takeover"
                             else CLOSE_INVALID_CREDENTIALS
                         )
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110 关闭通知尽力而为
                         pass
                     break
                 recv_task_done = recv_task

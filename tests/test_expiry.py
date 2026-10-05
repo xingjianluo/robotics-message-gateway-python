@@ -69,15 +69,15 @@ def test_session_expires_after_ttl_and_memory_reclaimed():
 
 
 def test_expiry_does_not_touch_online_sessions():
-    with _make_client(session_ttl=TTL, reap_interval=0.05) as client:
-        with client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as ws:
+    with _make_client(session_ttl=TTL, reap_interval=0.05) as client, \
+         client.websocket_connect("/ws?token=t-sub&client_id=subscriber") as ws:
             ws.receive_json()
             ws.send_json({"op": "subscribe", "filter": "robot/#"})
             ws.receive_json()
             time.sleep(TTL * 3)  # 在线会话即使空闲也不被回收
             stats = client.get("/stats", headers=auth("t-sub")).json()
-            session = [s for s in stats["sessions"]
-                       if s["client_id"] == "subscriber"][0]
+            session = next(s for s in stats["sessions"]
+                           if s["client_id"] == "subscriber")
             log_case(
                 "在线会话不被回收",
                 {"session_ttl": TTL, "idle": TTL * 3},
@@ -103,7 +103,7 @@ def test_offline_backlog_cap_drops_oldest():
                 headers=auth("t-pub"),
             )
         stats = client.get("/stats", headers=auth("t-sub")).json()
-        session = [s for s in stats["sessions"] if s["client_id"] == "subscriber"][0]
+        session = next(s for s in stats["sessions"] if s["client_id"] == "subscriber")
         log_case(
             "离线积压上限",
             {"max_offline_backlog": CAP, "published": total},
@@ -144,8 +144,8 @@ def test_backlog_cap_does_not_affect_online_clients():
                 assert got["message"]["payload"] == f"m{i}"
                 ws2.send_json({"op": "ack", "seq": got["message"]["seq"]})
             stats = client.get("/stats", headers=auth("t-sub")).json()
-            s2 = [s for s in stats["sessions"]
-                  if s["client_id"] == "subscriber-2"][0]
+            s2 = next(s for s in stats["sessions"]
+                      if s["client_id"] == "subscriber-2")
             log_case(
                 "修剪不影响在线客户端",
                 {"max_offline_backlog": CAP},
