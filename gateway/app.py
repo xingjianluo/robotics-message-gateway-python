@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -31,6 +32,7 @@ from . import topics
 from .admin import AdminEvent, create_admin_router
 from .auth import ACLStore, Action, DenyReason
 from .broker import Broker
+from .expiry import SessionReaper
 from .messages import Message
 from .session import Session, SessionManager
 
@@ -109,12 +111,35 @@ class Connection:
         )
 
 
-def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -> FastAPI:
-    app = FastAPI(title="robotics-message-gateway")
+def create_app(
+    max_queue: int = 100,
+    max_inflight: int = DEFAULT_MAX_INFLIGHT,
+    session_ttl: float = 0.0,
+    max_offline_backlog: int = 0,
+    reap_interval: float = 1.0,
+) -> FastAPI:
+    broker = Broker(max_queue=max_queue)
+    sessions = SessionManager()
+    reaper = SessionReaper(
+        sessions,
+        broker,
+        session_ttl=session_ttl,
+        max_offline_backlog=max_offline_backlog,
+        interval=reap_interval,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        await reaper.start()
+        yield
+        await reaper.stop()
+
+    app = FastAPI(title="robotics-message-gateway", lifespan=lifespan)
     app.state.max_inflight = max_inflight
-    app.state.broker = Broker(max_queue=max_queue)
+    app.state.broker = broker
     app.state.acl = ACLStore()
-    app.state.sessions = SessionManager()
+    app.state.sessions = sessions
+    app.state.reaper = reaper
 
     def _client_id_from(authorization: str | None) -> str | None:
         if not authorization or not authorization.startswith("Bearer "):
@@ -191,6 +216,7 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
             retain=bool(body.get("retain", False)),
         )
         result = await app.state.broker.publish(msg)
+        app.state.reaper.sweep()  # 离线积压上限即时生效
         return JSONResponse(
             {"accepted": True, "delivered": result.delivered, "seq": msg.seq}
         )
@@ -225,6 +251,7 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
             {
                 "broker": app.state.broker.stats(),
                 "sessions": app.state.sessions.all_stats(),
+                "expiry": app.state.reaper.stats.to_dict(),
             }
         )
 
@@ -338,6 +365,7 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
                 retain=bool(data.get("retain", False)),
             )
             await broker.publish(msg)
+            app.state.reaper.sweep()  # 离线积压上限即时生效
             return {"type": "published", "topic": topic, "seq": msg.seq}
 
         def handle_ack(data: dict) -> None:
