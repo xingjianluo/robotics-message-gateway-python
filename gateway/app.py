@@ -262,7 +262,14 @@ def create_app(max_queue: int = 100, max_inflight: int = DEFAULT_MAX_INFLIGHT) -
             for task in pumps.values():
                 task.cancel()
             if pumps:
-                await asyncio.gather(*pumps.values(), return_exceptions=True)
+                # 客户端 abrupt 断开时外层可能取消本协程；屏蔽取消，
+                # 确保泵退出与在途消息回收一定完成（不丢、不乱序）
+                wait = asyncio.gather(*pumps.values(), return_exceptions=True)
+                while not wait.done():
+                    try:
+                        await asyncio.shield(wait)
+                    except asyncio.CancelledError:
+                        continue
             # 已出队未发送的消息按序保存到会话，重连后先于新消息投递：
             # 先是 incoming 中较早的消息，再是泵取消瞬间在途的消息
             while True:

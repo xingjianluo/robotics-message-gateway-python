@@ -1,6 +1,8 @@
 """慢消费者：不阻塞其他客户端、内存有界、积压与丢弃可观测。"""
 from __future__ import annotations
 
+import time
+
 from fastapi.testclient import TestClient
 
 from gateway.app import create_app
@@ -42,7 +44,17 @@ def test_slow_consumer_does_not_block_others():
             # slow 从不读取、从不确认
 
         # 断开 slow：传输中的消息回收进会话，统计达到守恒稳态
-        stats = client.get("/stats", headers=auth("t-sub")).json()
+        # （服务端断线收尾异步完成，轮询等待其落定）
+        stats = None
+        for _ in range(50):
+            stats = client.get("/stats", headers=auth("t-sub")).json()
+            slow_now = {s["client_id"]: s for s in stats["sessions"]}["slow-1"]
+            if (
+                slow_now["pending_unacked"] + slow_now["ready"]
+                + slow_now["backlog"] + slow_now["dropped"] == TOTAL
+            ):
+                break
+            time.sleep(0.02)
         sessions = {s["client_id"]: s for s in stats["sessions"]}
         slow_stats, fast_stats = sessions["slow-1"], sessions["fast-1"]
         log_case(
